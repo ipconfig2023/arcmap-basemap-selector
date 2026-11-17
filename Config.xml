@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ESRI.Configuration xmlns="http://schemas.esri.com/Desktop/AddIns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <Name>Sampling 地图源</Name>
+  <AddInID>{53D85543-9B9B-43D4-82D4-0A33B6055D01}</AddInID>
+  <Description>为 ArcMap 集成 Esri、天地图、OSM、CARTO、NASA 和自定义地图源。</Description>
+  <Version>1.0.0</Version>
+  <Image>Images\Basemap.png</Image>
+  <Author>Sampling Project</Author>
+  <Company>Sampling Project</Company>
+  <Date>11/17/2026</Date>
+  <Targets><Target name="Desktop" version="10.8" /></Targets>
+  <AddIn language="CLR4.5" library="SamplingBasemaps.dll" namespace="SamplingBasemaps">
+    <ArcMap>
+      <Commands>
+        <Button id="SamplingBasemaps_Select" class="SelectBasemapButton" caption="地图源选择" category="Sampling 地图源" tip="选择并添加地图来源" message="选择影像、街道、地形、夜间灯光或自定义地图来源。" image="Images\Basemap.png" onDemand="false" />
+      </Commands>
+      <Toolbars><Toolbar id="SamplingBasemaps_Toolbar" caption="Sampling 地图源" showInitially="true"><Items><Button refID="SamplingBasemaps_Select" /></Items></Toolbar></Toolbars>
+      <Extensions><Extension id="SamplingBasemaps_Gateway" class="GatewayExtension" productName="Sampling 地图源服务" description="为已保存的 Sampling 底图恢复本机地图连接。" showInExtensionDialog="false" autoLoad="true" /></Extensions>
+    </ArcMap>
+  </AddIn>
+</ESRI.Configuration>

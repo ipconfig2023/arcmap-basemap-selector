@@ -1,0 +1,14 @@
+/build/
+/package/
+/verification/
+/WORK_STATE.md
+.vs/
+*.user
+*.suo
+__pycache__/
+*.pyc
+settings.json
+gateway.log
+/cache/
+*.mxd
+*.lyr
