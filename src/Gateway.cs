@@ -23,50 +23,107 @@ namespace SamplingBasemaps
         public const double HalfWorld=20037508.342789244;
         static readonly object[] Locks=Enumerable.Range(0,64).Select(x=>new object()).ToArray();
         public static Func<string,byte[]> DownloadOverride;
-        static string Hash(string input) { using(SHA256 sha=SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(input))).Replace("-",""); }
-        static byte[] Download(string url)
+        public static string CacheDirectory=Path.Combine(Settings.Root,"cache");
+        sealed class CachedImage { public byte[] Bytes; public long Until; }
+        sealed class MemoryImages
         {
-            if(DownloadOverride!=null) return DownloadOverride(url);
-            string hash=Hash(url), folder=Path.Combine(Settings.Root,"cache",hash.Substring(0,2));
+            sealed class Entry { public string Key; public CachedImage Image; }
+            readonly Dictionary<string,LinkedListNode<Entry>> index=new Dictionary<string,LinkedListNode<Entry>>();
+            readonly LinkedList<Entry> recent=new LinkedList<Entry>();
+            readonly long limit; long size;
+            public MemoryImages(long bytes) { limit=bytes; }
+            void Remove(LinkedListNode<Entry> node) { size-=node.Value.Image.Bytes.Length; index.Remove(node.Value.Key); recent.Remove(node); }
+            public CachedImage Get(string key) {
+                lock(index) {
+                    LinkedListNode<Entry> node; if(!index.TryGetValue(key,out node)) return null;
+                    if(node.Value.Image.Until<=DateTime.UtcNow.Ticks) { Remove(node); return null; }
+                    recent.Remove(node); recent.AddFirst(node); return node.Value.Image;
+                }
+            }
+            public void Put(string key,CachedImage image) {
+                if(image.Until<=DateTime.UtcNow.Ticks||image.Bytes.Length>limit) return;
+                lock(index) {
+                    LinkedListNode<Entry> old; if(index.TryGetValue(key,out old)) Remove(old);
+                    while(size+image.Bytes.Length>limit&&recent.Last!=null) Remove(recent.Last);
+                    index[key]=recent.AddFirst(new Entry{Key=key,Image=image}); size+=image.Bytes.Length;
+                }
+            }
+        }
+        static readonly MemoryImages TileMemory=new MemoryImages(32L*1024*1024),ViewMemory=new MemoryImages(16L*1024*1024);
+        static string Hash(string input) { using(SHA256 sha=SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(input))).Replace("-",""); }
+        static void ValidateImage(byte[] bytes) {
+            using(MemoryStream check=new MemoryStream(bytes)) using(Image image=Image.FromStream(check)) { if(image.Width>1024||image.Height>1024) throw new InvalidDataException("瓦片尺寸异常。"); }
+        }
+        static void WriteAtomic(string path,byte[] bytes) {
+            string temp=path+"."+Guid.NewGuid().ToString("N")+".tmp";
+            try { File.WriteAllBytes(temp,bytes); if(File.Exists(path)) File.Replace(temp,path,null); else File.Move(temp,path); }
+            finally { if(File.Exists(temp)) File.Delete(temp); }
+        }
+        static CachedImage Download(string url)
+        {
+            if(DownloadOverride!=null) return new CachedImage{Bytes=DownloadOverride(url),Until=0};
+            string hash=Hash(url), folder=Path.Combine(CacheDirectory,hash.Substring(0,2));
+            CachedImage cached=TileMemory.Get(hash); if(cached!=null) return cached;
             string file=Path.Combine(folder,hash+".tile"), expires=file+".expires";
             object gate=Locks[(hash.GetHashCode()&Int32.MaxValue)%Locks.Length];
             lock(gate) {
-                long until;
-                if(File.Exists(file) && File.Exists(expires) && Int64.TryParse(File.ReadAllText(expires),out until) && DateTime.UtcNow.Ticks<until) return File.ReadAllBytes(file);
+                cached=TileMemory.Get(hash); if(cached!=null) return cached;
+                try {
+                    long until;
+                    if(File.Exists(file)&&File.Exists(expires)&&Int64.TryParse(File.ReadAllText(expires),out until)&&DateTime.UtcNow.Ticks<until) {
+                        byte[] bytes=File.ReadAllBytes(file); ValidateImage(bytes);
+                        cached=new CachedImage{Bytes=bytes,Until=until}; TileMemory.Put(hash,cached);
+                        if(File.GetLastWriteTimeUtc(file)<DateTime.UtcNow.AddMinutes(-5)) File.SetLastWriteTimeUtc(file,DateTime.UtcNow);
+                        return cached;
+                    }
+                } catch(IOException) { } catch(UnauthorizedAccessException) { } catch(ArgumentException) { }
                 HttpWebRequest request=(HttpWebRequest)WebRequest.Create(url);
-                request.UserAgent="SamplingBasemaps/1.0 (ArcMap desktop add-in; interactive viewing)";
+                request.UserAgent="SamplingBasemaps/1.0.1 (ArcMap desktop add-in; interactive viewing)";
                 request.Timeout=12000; request.ReadWriteTimeout=12000; request.AutomaticDecompression=DecompressionMethods.GZip|DecompressionMethods.Deflate;
                 using(HttpWebResponse response=(HttpWebResponse)request.GetResponse()) {
                     using(MemoryStream stream=new MemoryStream()) {
                         using(Stream input=response.GetResponseStream()) input.CopyTo(stream);
                         byte[] bytes=stream.ToArray();
-                        using(MemoryStream check=new MemoryStream(bytes)) using(Image image=Image.FromStream(check)) { if(image.Width>1024||image.Height>1024) throw new InvalidDataException("瓦片尺寸异常。"); }
+                        ValidateImage(bytes);
                         DateTime expiry=DateTime.UtcNow.AddDays(7); string cc=response.Headers[HttpResponseHeader.CacheControl]??"";
-                        foreach(string directive in cc.Split(',')) { string d=directive.Trim(); int age; if(d.StartsWith("max-age=",StringComparison.OrdinalIgnoreCase)&&Int32.TryParse(d.Substring(8),out age)) expiry=DateTime.UtcNow.AddSeconds(Math.Max(0,age)); }
-                        DateTime serverExpiry;
-                        if(!cc.Contains("max-age=") && DateTime.TryParse(response.Headers[HttpResponseHeader.Expires],CultureInfo.InvariantCulture,DateTimeStyles.AdjustToUniversal,out serverExpiry)) expiry=serverExpiry.ToUniversalTime();
-                        if(!cc.Contains("no-store")&&!cc.Contains("no-cache")) {
-                            try { Directory.CreateDirectory(folder); File.WriteAllBytes(file,bytes); File.WriteAllText(expires,expiry.Ticks.ToString(CultureInfo.InvariantCulture)); } catch(IOException) { }
+                        bool allowed=true,hasMaxAge=false; long responseAge;
+                        if(!Int64.TryParse(response.Headers["Age"],out responseAge)) responseAge=0;
+                        foreach(string directive in cc.Split(',')) {
+                            string d=directive.Trim(); int age;
+                            if(d.Equals("no-store",StringComparison.OrdinalIgnoreCase)||d.Split('=')[0].Equals("no-cache",StringComparison.OrdinalIgnoreCase)) allowed=false;
+                            if(d.StartsWith("max-age=",StringComparison.OrdinalIgnoreCase)&&Int32.TryParse(d.Substring(8).Trim('"'),out age)) { expiry=DateTime.UtcNow.AddSeconds(Math.Max(0,(long)age-Math.Max(0,responseAge))); hasMaxAge=true; }
                         }
-                        return bytes;
+                        DateTime serverExpiry;
+                        if(!hasMaxAge&&DateTime.TryParse(response.Headers[HttpResponseHeader.Expires],CultureInfo.InvariantCulture,DateTimeStyles.AdjustToUniversal,out serverExpiry)) expiry=serverExpiry.ToUniversalTime();
+                        cached=new CachedImage{Bytes=bytes,Until=allowed?expiry.Ticks:0};
+                        if(allowed&&expiry>DateTime.UtcNow) {
+                            TileMemory.Put(hash,cached);
+                            try { Directory.CreateDirectory(folder); WriteAtomic(file,bytes); WriteAtomic(expires,Encoding.ASCII.GetBytes(expiry.Ticks.ToString(CultureInfo.InvariantCulture))); } catch(IOException) { } catch(UnauthorizedAccessException) { }
+                        }
+                        return cached;
                     }
                 }
             }
         }
-        public static void PruneCache()
+        public static void PruneCache(int limitMb)
         {
             try {
-                string root=Path.Combine(Settings.Root,"cache"); if(!Directory.Exists(root)) return;
+                string root=CacheDirectory; if(!Directory.Exists(root)) return;
                 FileInfo[] files=new DirectoryInfo(root).GetFiles("*.tile",SearchOption.AllDirectories); long size=files.Sum(x=>x.Length);
-                if(size<512L*1024*1024) return;
-                foreach(FileInfo file in files.OrderBy(x=>x.LastWriteTimeUtc)) { if(size<384L*1024*1024) break; size-=file.Length; file.Delete(); if(File.Exists(file.FullName+".expires")) File.Delete(file.FullName+".expires"); }
+                long limit=(long)Math.Max(256,Math.Min(16384,limitMb))*1024*1024;
+                if(size<=limit) return;
+                foreach(FileInfo file in files.OrderBy(x=>x.LastWriteTimeUtc)) { if(size<limit*3/4) break; long length=file.Length; file.Delete(); size-=length; if(File.Exists(file.FullName+".expires")) File.Delete(file.FullName+".expires"); }
             } catch { }
         }
-        sealed class Tile { public int X,Y; public byte[] Bytes; }
+        sealed class Tile { public int X,Y,Layer; public CachedImage Image; }
         public static byte[] Render(Source source, Settings settings, bool labels, double[] bbox, int width, int height)
         {
             if(width<1||height<1||width>4096||height>4096) throw new ArgumentException("图像宽高必须在 1—4096 像素之间。");
             if(bbox.Length!=4||bbox.Any(x=>Double.IsNaN(x)||Double.IsInfinity(x))||bbox[2]<=bbox[0]||bbox[3]<=bbox[1]||bbox.Any(x=>Math.Abs(x)>HalfWorld*8)) throw new ArgumentException("地图范围无效。");
+            string[] templates=(labels&&!String.IsNullOrEmpty(source.LabelUrl)?new[]{source.Url,source.LabelUrl}:new[]{source.Url})
+                .Select(t=>t.Contains("{key}")?t.Replace("{key}",Uri.EscapeDataString(settings.GetKey())):t).ToArray();
+            string viewKey=Hash(String.Join("\n",templates)+"\n"+source.MinZoom+":"+source.MaxZoom+":"+width+":"+height+":"+String.Join(",",bbox.Select(x=>x.ToString("R",CultureInfo.InvariantCulture))));
+            if(DownloadOverride==null) { CachedImage view=ViewMemory.Get(viewKey); if(view!=null) return view.Bytes; }
             double resolution=Math.Max((bbox[2]-bbox[0])/width,(bbox[3]-bbox[1])/height);
             int z=Math.Max(source.MinZoom,Math.Min(source.MaxZoom,(int)Math.Ceiling(Math.Log((HalfWorld*2)/(256*resolution),2))));
             int n=1<<z;
@@ -74,29 +131,31 @@ namespace SamplingBasemaps
             double top=(HalfWorld-bbox[3])/(HalfWorld*2)*n*256, bottom=(HalfWorld-bbox[1])/(HalfWorld*2)*n*256;
             int x0=(int)Math.Floor(left/256),x1=(int)Math.Ceiling(right/256)-1,y0=Math.Max(0,(int)Math.Floor(top/256)),y1=Math.Min(n-1,(int)Math.Ceiling(bottom/256)-1);
             if((long)(x1-x0+1)*Math.Max(0,y1-y0+1)>512) throw new ArgumentException("地图请求过大，请缩小导出尺寸或范围。");
+            List<Tile> tiles=new List<Tile>();
+            for(int layer=0;layer<templates.Length;layer++) for(int y=y0;y<=y1;y++) for(int x=x0;x<=x1;x++) tiles.Add(new Tile{X=x,Y=y,Layer=layer});
+            int failed=0;
+            // One bounded queue lets imagery and labels load together without doubling provider concurrency.
+            Parallel.ForEach(tiles.OrderBy(t=>t.Y).ThenBy(t=>t.X).ThenBy(t=>t.Layer),new ParallelOptions{MaxDegreeOfParallelism=source.Connections},tile=>{
+                try { tile.Image=Download(source.TileUrl(templates[tile.Layer],settings,z,((tile.X%n)+n)%n,tile.Y)); } catch { Interlocked.Increment(ref failed); }
+            });
+            if(failed>0) throw new IOException("地图源有 "+failed+" / "+tiles.Count+" 张瓦片未能获取。请检查网络、来源地址或天地图 Key 后重试。");
+            long viewUntil=tiles.Count==0?DateTime.UtcNow.AddDays(7).Ticks:tiles.Min(t=>t.Image.Until);
             using(Bitmap canvas=new Bitmap(width,height,PixelFormat.Format32bppArgb)) {
                 using(Graphics g=Graphics.FromImage(canvas)) {
                     g.Clear(Color.Transparent); g.InterpolationMode=InterpolationMode.HighQualityBilinear; g.PixelOffsetMode=PixelOffsetMode.Half;
-                    int total=0,failed=0;
-                    string[] templates=labels&&!String.IsNullOrEmpty(source.LabelUrl)?new[]{source.Url,source.LabelUrl}:new[]{source.Url};
-                    foreach(string template in templates) {
-                        List<Tile> tiles=new List<Tile>(); for(int y=y0;y<=y1;y++) for(int x=x0;x<=x1;x++) tiles.Add(new Tile{X=x,Y=y});
-                        Parallel.ForEach(tiles,new ParallelOptions{MaxDegreeOfParallelism=source.Connections},tile=>{
-                            try { tile.Bytes=Download(source.TileUrl(template,settings,z,((tile.X%n)+n)%n,tile.Y)); } catch { Interlocked.Increment(ref failed); }
-                        });
                         foreach(Tile tile in tiles) {
-                            total++;
-                            if(tile.Bytes==null) continue;
-                            using(MemoryStream input=new MemoryStream(tile.Bytes)) using(Image image=Image.FromStream(input)) {
+                            using(MemoryStream input=new MemoryStream(tile.Image.Bytes)) using(Image image=Image.FromStream(input)) {
                                 float dx=(float)((tile.X*256-left)/(right-left)*width), dy=(float)((tile.Y*256-top)/(bottom-top)*height);
                                 float dw=(float)(256/(right-left)*width), dh=(float)(256/(bottom-top)*height);
                                 using(ImageAttributes attributes=new ImageAttributes()) { attributes.SetWrapMode(WrapMode.TileFlipXY); g.DrawImage(image,new[]{new PointF(dx,dy),new PointF(dx+dw,dy),new PointF(dx,dy+dh)},new RectangleF(0,0,image.Width,image.Height),GraphicsUnit.Pixel,attributes); }
                             }
                         }
-                    }
-                    if(failed>0) throw new IOException("地图源有 "+failed+" / "+total+" 张瓦片未能获取。请检查网络、来源地址或天地图 Key 后重试。");
                 }
-                using(MemoryStream output=new MemoryStream()) { canvas.Save(output,ImageFormat.Png); return output.ToArray(); }
+                using(MemoryStream output=new MemoryStream()) {
+                    canvas.Save(output,ImageFormat.Png); byte[] bytes=output.ToArray();
+                    if(DownloadOverride==null) ViewMemory.Put(viewKey,new CachedImage{Bytes=bytes,Until=viewUntil});
+                    return bytes;
+                }
             }
         }
     }
@@ -110,7 +169,10 @@ namespace SamplingBasemaps
         public static int Main(string[] args)
         {
             settingsPath=Settings.FileName;
-            for(int i=0;i<args.Length-1;i++) if(args[i]=="--settings") settingsPath=args[++i];
+            for(int i=0;i<args.Length-1;i++) {
+                if(args[i]=="--settings") settingsPath=args[++i];
+                else if(args[i]=="--cache-root") TileRenderer.CacheDirectory=Path.GetFullPath(args[++i]);
+            }
             try {
                 ServicePointManager.SecurityProtocol=SecurityProtocolType.Tls12;
                 ServicePointManager.DefaultConnectionLimit=16;
@@ -118,11 +180,14 @@ namespace SamplingBasemaps
                 using(Mutex mutex=new Mutex(false,"Local\\SamplingBasemapGateway_"+settings.Port)) {
                     if(!mutex.WaitOne(0)) return 0;
                     TcpListener listener=new TcpListener(IPAddress.Loopback,settings.Port); listener.Start();
-                    Task.Run((Action)TileRenderer.PruneCache); Log("Started version="+GatewayClient.Signature+" port="+settings.Port);
+                    Task.Run(()=>TileRenderer.PruneCache(settings.CacheLimitMb));
+                    using(Timer maintenance=new Timer(o=> { try { TileRenderer.PruneCache(Settings.Load(settingsPath).CacheLimitMb); } catch { } },null,TimeSpan.FromMinutes(5),TimeSpan.FromMinutes(5))) {
+                    Log("Started version=1.0.1 protocol="+GatewayClient.Signature+" port="+settings.Port);
                     while(true) {
                         TcpClient client=listener.AcceptTcpClient();
                         if(!Slots.Wait(0)) { client.Close(); continue; }
                         Task.Run(()=> { try { Handle(client); } catch(Exception error) { Log("Request failed: "+error.GetType().Name); } finally { client.Close(); Slots.Release(); } });
+                    }
                     }
                 }
             } catch(Exception error) { Log("Startup failed: "+error.Message); return 1; }

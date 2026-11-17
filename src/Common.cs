@@ -23,13 +23,14 @@ namespace SamplingBasemaps
         public string CustomUrl = "";
         public string CustomAttribution = "";
         public int CustomMaxZoom = 19;
+        public int CacheLimitMb = 2048;
         public static string Root { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SamplingBasemaps"); } }
         public static string FileName { get { return Path.Combine(Root, "settings.json"); } }
         public static Settings Load(string path)
         {
             if (!File.Exists(path)) return new Settings();
             Settings s = new JavaScriptSerializer().Deserialize<Settings>(File.ReadAllText(path, Encoding.UTF8));
-            if (s == null || s.Port < 1024 || s.Port > 65535 || s.CustomMaxZoom < 0 || s.CustomMaxZoom > 22)
+            if (s == null || s.Port < 1024 || s.Port > 65535 || s.CustomMaxZoom < 0 || s.CustomMaxZoom > 22 || s.CacheLimitMb < 256 || s.CacheLimitMb > 16384)
                 throw new InvalidDataException("地图源设置文件无效：" + path);
             return s;
         }
@@ -89,12 +90,14 @@ namespace SamplingBasemaps
         }
         public string TileUrl(string template, Settings settings, int z, int x, int y)
         {
-            return template.Replace("{z}",z.ToString(CultureInfo.InvariantCulture)).Replace("{x}",x.ToString(CultureInfo.InvariantCulture)).Replace("{y}",y.ToString(CultureInfo.InvariantCulture)).Replace("{s}","a").Replace("{r}","").Replace("{key}",Uri.EscapeDataString(settings.GetKey()));
+            string url=template.Replace("{z}",z.ToString(CultureInfo.InvariantCulture)).Replace("{x}",x.ToString(CultureInfo.InvariantCulture)).Replace("{y}",y.ToString(CultureInfo.InvariantCulture)).Replace("{s}","a").Replace("{r}","");
+            return url.Contains("{key}")?url.Replace("{key}",Uri.EscapeDataString(settings.GetKey())):url;
         }
     }
 
     public static class GatewayClient
     {
+        // This is the wire protocol signature; compatible maintenance releases share it.
         public const string Signature = "sampling-basemaps-1.0.0";
         public static string BaseUrl(Settings settings) { return "http://127.0.0.1:" + settings.Port.ToString(CultureInfo.InvariantCulture); }
         public static bool IsRunning(Settings settings)

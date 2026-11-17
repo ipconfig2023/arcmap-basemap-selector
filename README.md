@@ -49,9 +49,14 @@
 - 源码：`src\`；编译：`build.ps1`；安装：`install.ps1`
 - 用户设置：`%LOCALAPPDATA%\SamplingBasemaps\settings.json`
 - 运行日志：`%LOCALAPPDATA%\SamplingBasemaps\gateway.log`
-- 按需瓦片缓存：`%LOCALAPPDATA%\SamplingBasemaps\cache`。尊重服务的有效期；服务未提供缓存期限时默认 7 天。启动时超出 512 MB 的旧缓存会整理至约 384 MB。
+- 自动瓦片缓存：`%LOCALAPPDATA%\SamplingBasemaps\cache`。打开、拖动和缩放时，成功下载且允许缓存的瓦片自动保存；回到相同来源、相同缩放级别的区域会直接复用，重启 ArcMap 后仍有效。缩放到其他级别可能需要不同瓦片，首次仍需联网。
+- v1.0.1 增加 32 MB 瓦片内存缓存和 16 MB 完整画面缓存，减少重复磁盘读取和重复拼图；影像与注记共用有并发上限的加载队列。不同范围仍需重新拼图和由 ArcMap 投影、绘制，因此不能保证所有拖动都即时完成。
+- 磁盘缓存默认上限 **2048 MB（2 GB）**，可在地图源窗口调整为 256—16384 MB，点击“保存设置”生效；“打开缓存”可查看文件。启动及每 5 分钟检查容量，超限时将较旧内容清理至上限的约 75%，因此这是定期整理的上限，期间可能暂时超过。
+- 缓存遵守地图服务的有效期和禁止缓存要求；服务未提供有效期时默认 7 天。过期内容重新下载，禁止缓存的来源不进入内存画面缓存。此功能不批量预下载，也不保证离线可用。
 
 本机地图服务仅监听 `127.0.0.1`，默认端口 `17868`；后台进程名为 `SamplingBasemapGateway.exe`，由插件启动，可持续运行至 Windows 会话结束，不创建开机启动项。若修改设置文件端口，需同步修复既有地图的 WMS 连接。卸载可在 ArcMap Add-In 管理器移除本插件并重新启动 ArcMap。
+
+从 v1.0.0 升级时，推荐在下载的仓库目录运行 `install.ps1`：脚本会更新当前用户正在运行的旧地图服务，保留磁盘缓存，再保存工作并重新打开 ArcMap，让选择窗口更新。如果只双击安装包升级，需先保存工作并关闭 ArcMap，在任务管理器结束当前用户的 `SamplingBasemapGateway.exe`，再打开 ArcMap，以便启动新版缓存服务。
 
 ## 从源码构建与验证
 
@@ -60,6 +65,8 @@
 ```powershell
 .\build.ps1
 .\tests\run.ps1
+# 可选：需 Python 3，使用本地模拟地图服务检查真实缓存链路及重复画面耗时
+python .\tests\cache.py
 # 可选：安装至当前 Windows 用户
 .\install.ps1
 ```

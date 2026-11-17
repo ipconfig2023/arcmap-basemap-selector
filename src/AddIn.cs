@@ -87,16 +87,17 @@ namespace SamplingBasemaps
         readonly Label notes=new Label(),credits=new Label(),status=new Label();
         readonly TextBox key=new TextBox(),customName=new TextBox(),customUrl=new TextBox(),customCredits=new TextBox();
         readonly NumericUpDown customZoom=new NumericUpDown();
+        readonly NumericUpDown cacheLimit=new NumericUpDown();
         readonly CheckBox labels=new CheckBox(),replace=new CheckBox();
         readonly Button add=new Button(),test=new Button(),save=new Button();
         Settings settings;
         public SourceForm(IApplication app)
         {
             application=app; settings=Settings.Load(Settings.FileName);
-            Text="Sampling 地图源 · ArcMap 10.8"; Font=new Font("Microsoft YaHei UI",9F); BackColor=Color.White;
-            StartPosition=FormStartPosition.CenterParent; Size=new Size(760,720); MinimumSize=new Size(700,680); AutoScaleMode=AutoScaleMode.Dpi;
-            TableLayoutPanel root=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=1,RowCount=9,Padding=new Padding(22,16,22,16)};
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute,40)); root.RowStyles.Add(new RowStyle(SizeType.Absolute,38)); root.RowStyles.Add(new RowStyle(SizeType.Absolute,63)); root.RowStyles.Add(new RowStyle(SizeType.Absolute,44)); root.RowStyles.Add(new RowStyle(SizeType.Absolute,46)); root.RowStyles.Add(new RowStyle(SizeType.Absolute,185)); root.RowStyles.Add(new RowStyle(SizeType.Percent,100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute,59)); root.RowStyles.Add(new RowStyle(SizeType.Absolute,42));
+            Text="Sampling 地图源 · ArcMap 10.8 · v1.0.1"; Font=new Font("Microsoft YaHei UI",9F); BackColor=Color.White;
+            StartPosition=FormStartPosition.CenterParent; Size=new Size(760,760); MinimumSize=new Size(700,720); AutoScaleMode=AutoScaleMode.Dpi;
+            TableLayoutPanel root=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=1,RowCount=10,Padding=new Padding(22,16,22,16)};
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute,40)); root.RowStyles.Add(new RowStyle(SizeType.Absolute,38)); root.RowStyles.Add(new RowStyle(SizeType.Absolute,63)); root.RowStyles.Add(new RowStyle(SizeType.Absolute,44)); root.RowStyles.Add(new RowStyle(SizeType.Absolute,46)); root.RowStyles.Add(new RowStyle(SizeType.Absolute,40)); root.RowStyles.Add(new RowStyle(SizeType.Absolute,185)); root.RowStyles.Add(new RowStyle(SizeType.Percent,100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute,59)); root.RowStyles.Add(new RowStyle(SizeType.Absolute,42));
             Controls.Add(root);
             root.Controls.Add(new Label{Text="选择地图来源",Font=new Font(Font.FontFamily,16,FontStyle.Bold),Dock=DockStyle.Fill,ForeColor=Color.FromArgb(31,58,72)},0,0);
             sources.DropDownStyle=ComboBoxStyle.DropDownList; sources.Dock=DockStyle.Fill;
@@ -108,18 +109,24 @@ namespace SamplingBasemaps
             replace.Text="替换此前由此插件添加的底图"; replace.AutoSize=true; replace.Checked=settings.Replace;
             options.Controls.Add(labels); options.Controls.Add(replace); root.Controls.Add(options,0,3);
             key.UseSystemPasswordChar=true; key.Dock=DockStyle.Fill; key.Text=settings.GetKey(); root.Controls.Add(Row("天地图 Key",key),0,4);
+            FlowLayoutPanel cache=new FlowLayoutPanel{Dock=DockStyle.Fill,WrapContents=false};
+            cacheLimit.Minimum=256; cacheLimit.Maximum=16384; cacheLimit.Increment=256; cacheLimit.Value=settings.CacheLimitMb; cacheLimit.Width=82;
+            cache.Controls.Add(cacheLimit); cache.Controls.Add(new Label{Text="MB · 已浏览区域自动缓存",AutoSize=true,Padding=new Padding(0,5,8,0)});
+            Button cacheFolder=new Button{Text="打开缓存",AutoSize=true,Height=28};
+            cacheFolder.Click+=(o,e)=> { try { string folder=System.IO.Path.Combine(Settings.Root,"cache"); Directory.CreateDirectory(folder); System.Diagnostics.Process.Start("explorer.exe",folder); } catch(Exception error) { ShowError(error); } };
+            cache.Controls.Add(cacheFolder); root.Controls.Add(Row("缓存上限",cache),0,5);
             GroupBox custom=new GroupBox{Text="自定义地图 / 真实历史影像",Dock=DockStyle.Fill,Padding=new Padding(12,20,12,8)};
             TableLayoutPanel customRows=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=1,RowCount=4};
             for(int i=0;i<4;i++) customRows.RowStyles.Add(new RowStyle(SizeType.Percent,25));
             customName.Text=settings.CustomName; customUrl.Text=settings.CustomUrl; customCredits.Text=settings.CustomAttribution; customZoom.Minimum=0; customZoom.Maximum=22; customZoom.Value=settings.CustomMaxZoom;
-            customRows.Controls.Add(Row("显示名称",customName),0,0); customRows.Controls.Add(Row("XYZ 地址",customUrl),0,1); customRows.Controls.Add(Row("来源署名",customCredits),0,2); customRows.Controls.Add(Row("最大级别",customZoom),0,3); custom.Controls.Add(customRows); root.Controls.Add(custom,0,5);
-            credits.Dock=DockStyle.Fill; credits.Padding=new Padding(0,10,0,0); credits.ForeColor=Color.FromArgb(95,103,111); root.Controls.Add(credits,0,6);
-            status.Dock=DockStyle.Fill; status.Padding=new Padding(10,8,10,6); status.BackColor=Color.FromArgb(242,246,249); status.Text="选择来源后点击“添加 / 切换”。底图需要联网，采样点与其他图层会保留。"; root.Controls.Add(status,0,7);
+            customRows.Controls.Add(Row("显示名称",customName),0,0); customRows.Controls.Add(Row("XYZ 地址",customUrl),0,1); customRows.Controls.Add(Row("来源署名",customCredits),0,2); customRows.Controls.Add(Row("最大级别",customZoom),0,3); custom.Controls.Add(customRows); root.Controls.Add(custom,0,6);
+            credits.Dock=DockStyle.Fill; credits.Padding=new Padding(0,10,0,0); credits.ForeColor=Color.FromArgb(95,103,111); root.Controls.Add(credits,0,7);
+            status.Dock=DockStyle.Fill; status.Padding=new Padding(10,8,10,6); status.BackColor=Color.FromArgb(242,246,249); status.Text="已浏览瓦片自动缓存，拖回原区域会复用。新区域、新缩放级别和过期内容需要联网加载。"; root.Controls.Add(status,0,8);
             FlowLayoutPanel buttons=new FlowLayoutPanel{Dock=DockStyle.Fill,FlowDirection=FlowDirection.RightToLeft,WrapContents=false};
             Button close=new Button{Text="关闭",Width=76,Height=32}; close.Click+=(o,e)=>Close(); CancelButton=close;
             add.Text=application==null?"预览模式":"添加 / 切换"; add.Width=118; add.Height=32; add.Enabled=application!=null;
             test.Text="测试连接"; test.Width=96; test.Height=32; save.Text="保存设置"; save.Width=96; save.Height=32;
-            buttons.Controls.Add(close); buttons.Controls.Add(add); buttons.Controls.Add(test); buttons.Controls.Add(save); root.Controls.Add(buttons,0,8);
+            buttons.Controls.Add(close); buttons.Controls.Add(add); buttons.Controls.Add(test); buttons.Controls.Add(save); root.Controls.Add(buttons,0,9);
             sources.SelectedIndexChanged+=(o,e)=>{Source source=(Source)sources.SelectedItem; notes.Text=source.Notes; credits.Text="地图来源："+source.Attribution+"\n出图时请保留来源署名。自定义地址需使用 EPSG:3857 XYZ，含 {z}、{x}、{y}。"; key.Enabled=source.Id=="tianditu"; custom.Enabled=source.Id=="custom"; labels.Enabled=!String.IsNullOrEmpty(source.LabelUrl);};
             sources.SelectedIndex=Math.Max(0,sources.Items.Cast<Source>().ToList().FindIndex(x=>x.Id==settings.SelectedSource));
             save.Click+=(o,e)=>{try { ReadSettings(false); status.Text="设置已保存。"; } catch(Exception error) { ShowError(error); }};
@@ -145,6 +152,7 @@ namespace SamplingBasemaps
             Source selected=(Source)sources.SelectedItem;
             settings.SelectedSource=selected.Id; settings.Labels=labels.Checked; settings.Replace=replace.Checked; settings.SetKey(key.Text);
             settings.CustomName=customName.Text.Trim(); settings.CustomUrl=customUrl.Text.Trim(); settings.CustomAttribution=customCredits.Text.Trim(); settings.CustomMaxZoom=(int)customZoom.Value;
+            settings.CacheLimitMb=(int)cacheLimit.Value;
             Source actual=validate?Source.Find(settings,selected.Id):Source.Catalog(settings).First(x=>x.Id==selected.Id);
             settings.Save(Settings.FileName); return actual;
         }
